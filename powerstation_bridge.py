@@ -40,6 +40,22 @@ _client_lock = threading.Lock()
 _client: PowerstationClient = None
 
 
+def as_bool(value, default: bool = False) -> bool:
+    """Coerce a JSON value to a boolean.
+
+    bool("false") is True, so raw truthiness would switch a load ON when the
+    caller sent the string "false" or "off". Accept real booleans, numbers and
+    the usual on/off spellings, and fall back to `default` otherwise.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "on", "yes", "enable", "enabled")
+    return default
+
+
 def get_client(host: str = None, port: int = None) -> PowerstationClient:
     """Return a connected client, (re)connecting if needed."""
     global _client
@@ -192,14 +208,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
 
         routes = {
-            "/api/master": lambda c: c.set_master_switch(bool(body.get("on"))),
-            "/api/ac": lambda c: c.set_ac_output(bool(body.get("on"))),
-            "/api/dc": lambda c: c.set_dc_output(bool(body.get("on"))),
-            "/api/beep": lambda c: c.set_buzzer(bool(body.get("on"))),
-            "/api/ambient-light": lambda c: c.set_ambient_light(bool(body.get("on"))),
-            "/api/sleep-mode": lambda c: c.set_sleep_mode(bool(body.get("on"))),
-            "/api/amp-up": lambda c: c.set_amp_up_mode(bool(body.get("on"))),
-            "/api/four-g": lambda c: c.set_four_g_switch(bool(body.get("on"))),
+            "/api/master": lambda c: c.set_master_switch(as_bool(body.get("on"))),
+            "/api/ac": lambda c: c.set_ac_output(as_bool(body.get("on"))),
+            "/api/dc": lambda c: c.set_dc_output(as_bool(body.get("on"))),
+            "/api/beep": lambda c: c.set_buzzer(as_bool(body.get("on"))),
+            "/api/ambient-light": lambda c: c.set_ambient_light(as_bool(body.get("on"))),
+            "/api/sleep-mode": lambda c: c.set_sleep_mode(as_bool(body.get("on"))),
+            "/api/amp-up": lambda c: c.set_amp_up_mode(as_bool(body.get("on"))),
+            "/api/four-g": lambda c: c.set_four_g_switch(as_bool(body.get("on"))),
             "/api/ac-hz": lambda c: c.set_ac_frequency(int(body.get("hz", 60))),
             "/api/led/brightness": lambda c: c.set_led_brightness(int(body.get("value", 50))),
             "/api/led/color": lambda c: c.set_led_color(int(body.get("id", 1))),

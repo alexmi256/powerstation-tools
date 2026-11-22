@@ -184,6 +184,48 @@ def parse_ack(data: str) -> str:
     return {"55": "success", "CC": "fail", "33": "error"}.get(data.upper(), "unknown")
 
 
+MAX_FRAME_BYTES = 4096
+
+
+def _next_frame(buf: bytes):
+    """Pull the next complete frame off the front of *buf*.
+
+    Returns ``(frame_text, remaining_bytes)``, or ``(None, buf)`` when more
+    bytes are still needed. The 4-hex-digit length field is honoured first -
+    it is correct for the hex-encoded ('base2') payloads the device sends - so
+    a data field that happens to contain the bytes 0xCC,0x33 (rendering as the
+    literal terminator "CC33" in hex) no longer truncates the frame. Frames
+    whose length field cannot be trusted fall back to a terminator scan, which
+    is also what resyncs after a corrupt frame.
+    """
+    while True:
+        start = buf.find(b"AA55")
+        if start < 0:
+            # No frame start in sight; drop everything that cannot be one.
+            return None, (b"" if len(buf) < 4 else buf[-3:])
+        if start:
+            buf = buf[start:]
+        if len(buf) < 12:
+            return None, buf
+        try:
+            declared = int(buf[4:8], 16)
+        except ValueError:
+            buf = buf[4:]  # not a real header - skip and resync
+            continue
+        if 11 <= declared <= MAX_FRAME_BYTES:
+            end = declared * 2
+            if len(buf) >= end:
+                candidate = buf[:end]
+                if candidate[-4:] == b"CC33":
+                    return candidate.decode("utf-8", errors="ignore"), buf[end:]
+                # Length and terminator disagree - treat the length as unusable
+                # for this frame and fall back to the scan below.
+        end = buf.find(b"CC33")
+        if end < 0:
+            return None, buf
+        return buf[:end + 4].decode("utf-8", errors="ignore"), buf[end + 4:]
+
+
 def _frame_crc_ok(frame_text: str) -> bool:
     """Validate a frame's CRC before trusting its contents."""
     if len(frame_text) < 22 or not frame_text.startswith("AA55") or not frame_text.endswith("CC33"):
@@ -622,20 +664,8 @@ class PowerstationClient:
         skipped = []
 
         while True:
-            # Resync to the next frame start if there's junk ahead of it.
-            start = self._recv_buffer.find(b"AA55")
-            if start == -1:
-                self._recv_buffer = b""
-            elif start > 0:
-                self._recv_buffer = self._recv_buffer[start:]
-
-            end = self._recv_buffer.find(b"CC33")
-            if end != -1:
-                frame_end = end + 4
-                raw_frame = self._recv_buffer[:frame_end]
-                self._recv_buffer = self._recv_buffer[frame_end:]
-                text = raw_frame.decode("utf-8", errors="ignore")
-
+            text, self._recv_buffer = _next_frame(self._recv_buffer)
+            if text is not None:
                 if not _frame_crc_ok(text):
                     self._log(f"<- received frame with bad CRC, discarding: {text!r}")
                     continue  # corrupt frame, drop and keep looking
@@ -807,19 +837,8 @@ class PowerstationClient:
                   f"timestamping everything that arrives...")
 
         while time.time() < deadline:
-            start_idx = self._recv_buffer.find(b"AA55")
-            if start_idx == -1:
-                self._recv_buffer = b""
-            elif start_idx > 0:
-                self._recv_buffer = self._recv_buffer[start_idx:]
-
-            end = self._recv_buffer.find(b"CC33")
-            if end != -1:
-                frame_end = end + 4
-                raw_frame = self._recv_buffer[:frame_end]
-                self._recv_buffer = self._recv_buffer[frame_end:]
-                text = raw_frame.decode("utf-8", errors="ignore")
-
+            text, self._recv_buffer = _next_frame(self._recv_buffer)
+            if text is not None:
                 if not _frame_crc_ok(text):
                     continue
                 frame = parse_response_frame(text)
@@ -1393,20 +1412,8 @@ class PowerstationClient:
         self._log(f"quick-connect: waiting up to {timeout:.0f}s for the device to announce itself...")
 
         while time.time() < deadline:
-            # Resync to the next frame start if there's junk ahead of it.
-            start = self._recv_buffer.find(b"AA55")
-            if start == -1:
-                self._recv_buffer = b""
-            elif start > 0:
-                self._recv_buffer = self._recv_buffer[start:]
-
-            end = self._recv_buffer.find(b"CC33")
-            if end != -1:
-                frame_end = end + 4
-                raw_frame = self._recv_buffer[:frame_end]
-                self._recv_buffer = self._recv_buffer[frame_end:]
-                text = raw_frame.decode("utf-8", errors="ignore")
-
+            text, self._recv_buffer = _next_frame(self._recv_buffer)
+            if text is not None:
                 if not _frame_crc_ok(text):
                     self._log(f"<- received frame with bad CRC during quick-connect, discarding: {text!r}")
                     continue

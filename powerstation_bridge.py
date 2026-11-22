@@ -25,8 +25,13 @@ from socketserver import ThreadingMixIn
 
 from powerstation_control import PowerstationClient, PowerstationError
 
-HOST = "0.0.0.0"
-PORT = 8090
+HOST = os.environ.get("PS_BRIDGE_HOST", "0.0.0.0")
+PORT = int(os.environ.get("PS_BRIDGE_PORT", "8090"))
+# Device address. The default is only reachable on the unit's own setup
+# hotspot; set PS_DEVICE_HOST (or --device) to the unit's LAN IP to control it
+# after it has joined your Wi-Fi.
+DEVICE_HOST = os.environ.get("PS_DEVICE_HOST", "192.168.4.1")
+DEVICE_PORT = int(os.environ.get("PS_DEVICE_PORT", "5000"))
 DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "powerstation_dashboard.html")
 
 # Single shared client + lock, since the device only handles one TCP
@@ -49,7 +54,8 @@ def get_client(host: str = None, port: int = None) -> PowerstationClient:
                 _client.disconnect()
             except Exception:
                 pass
-        _client = PowerstationClient(host=host, port=port)
+        _client = PowerstationClient(host=host or DEVICE_HOST,
+                                    port=port or DEVICE_PORT)
         _client.connect(timeout=5.0)
     return _client
 
@@ -244,7 +250,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 # follows a disconnect with no gap.
                 time.sleep(1.0)
 
-            client = PowerstationClient(host="192.168.4.1", port=5000)
+            client = PowerstationClient(host=DEVICE_HOST, port=DEVICE_PORT)
             try:
                 client.connect(timeout=5.0)
                 result = client.provision_wifi(ssid, password, timeout=30.0)
@@ -273,8 +279,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    global HOST, PORT, DEVICE_HOST, DEVICE_PORT
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Powerstation HTTP bridge.")
+    ap.add_argument("--bind", default=HOST,
+                    help=f"address to listen on (default {HOST}, env PS_BRIDGE_HOST)")
+    ap.add_argument("--port", type=int, default=PORT,
+                    help=f"port to listen on (default {PORT}, env PS_BRIDGE_PORT)")
+    ap.add_argument("--device", default=DEVICE_HOST,
+                    help=f"power station IP (default {DEVICE_HOST}, env PS_DEVICE_HOST)")
+    ap.add_argument("--device-port", type=int, default=DEVICE_PORT,
+                    help=f"power station TCP port (default {DEVICE_PORT}, env PS_DEVICE_PORT)")
+    args = ap.parse_args()
+    HOST, PORT = args.bind, args.port
+    DEVICE_HOST, DEVICE_PORT = args.device, args.device_port
+
     server = ThreadingHTTPServer((HOST, PORT), BridgeHandler)
-    print(f"Powerstation bridge running at http://localhost:{PORT}")
+    print(f"Powerstation bridge running at http://{HOST}:{PORT} "
+          f"(device {DEVICE_HOST}:{DEVICE_PORT})")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()

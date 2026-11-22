@@ -32,6 +32,9 @@ PORT = int(os.environ.get("PS_BRIDGE_PORT", "8090"))
 # after it has joined your Wi-Fi.
 DEVICE_HOST = os.environ.get("PS_DEVICE_HOST", "192.168.4.1")
 DEVICE_PORT = int(os.environ.get("PS_DEVICE_PORT", "5000"))
+# Largest JSON request body the bridge will read. Every legitimate body is a
+# handful of fields; without a cap one request can pin a thread indefinitely.
+MAX_BODY_BYTES = 64 * 1024
 DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "powerstation_dashboard.html")
 
 # Single shared client + lock, since the device only handles one TCP
@@ -74,6 +77,14 @@ def get_client(host: str = None, port: int = None) -> PowerstationClient:
                                     port=port or DEVICE_PORT)
         _client.connect(timeout=5.0)
     return _client
+
+
+class BadRequest(Exception):
+    """A request the bridge refuses to act on, with the status to answer."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -128,10 +139,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
             pass
 
     def read_json_body(self) -> dict:
-        length = int(self.headers.get("Content-Length", 0))
-        if length <= 0:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            raise BadRequest("invalid Content-Length")
+        if length < 0:
+            raise BadRequest("invalid Content-Length")
+        if length > MAX_BODY_BYTES:
+            raise BadRequest(f"request body exceeds {MAX_BODY_BYTES} bytes", status=413)
+        if length == 0:
             return {}
-        raw = self.rfile.read(length).decode("utf-8")
+        raw = self.rfile.read(length).decode("utf-8", errors="replace")
         if not raw:
             return {}
         try:
@@ -201,7 +219,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
-        body = self.read_json_body()
+        try:
+            body = self.read_json_body()
+        except BadRequest as e:
+            self.send_json({"ok": False, "error": str(e)}, status=e.status)
+            return
 
         if path == "/api/wifi/provision":
             self.handle_wifi_provision(body)

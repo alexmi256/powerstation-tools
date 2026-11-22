@@ -7,11 +7,17 @@ and serves the dark-mode dashboard (powerstation_dashboard.html) at '/'.
 Run:
     python3 powerstation_bridge.py
 Then open:
-    http://localhost:8090
+    http://<this-host>:8090
 
-Listens on localhost:8090 by default. Keep this on localhost - there is
-no authentication, and anyone who can reach this port can control the
-device.
+Listens on 0.0.0.0:8090 by default, i.e. on every interface, and serves the
+dashboard and the control API with **no authentication**: anyone who can reach
+the port can switch the device's AC/DC/master outputs. Bind it to a trusted
+interface (--bind or PS_BRIDGE_HOST) if that is not what you want, and do not
+port-forward it.
+
+The unit is talked to at 192.168.4.1:5000 by default, which is only valid
+while the phone/host is on the unit's own setup hotspot. Once the unit has
+joined your Wi-Fi, point the bridge at it with --device / PS_DEVICE_HOST.
 """
 
 import json

@@ -43,7 +43,18 @@ Then open `http://localhost:8090`.
 
 The bridge listens on `0.0.0.0:8090` with no authentication - keep it
 on a trusted network. Anyone who can reach that port can control the
-device.
+device. Use `--bind` / `PS_BRIDGE_HOST` and `--port` / `PS_BRIDGE_PORT` to
+change that.
+
+The device is addressed at `192.168.4.1:5000` by default, which only works
+while you are joined to the unit's own hotspot. Once it is on your Wi-Fi,
+give the bridge its LAN address:
+
+```
+PS_DEVICE_HOST=192.168.1.42 python3 powerstation_bridge.py
+# or
+python3 powerstation_bridge.py --device 192.168.1.42 --bind 0.0.0.0
+```
 
 Turn the device on. Press the WiFi button to turn it on then off. Hold it until it beeps then join the device SSID.
 

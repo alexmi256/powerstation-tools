@@ -7,11 +7,17 @@ and serves the dark-mode dashboard (powerstation_dashboard.html) at '/'.
 Run:
     python3 powerstation_bridge.py
 Then open:
-    http://localhost:8090
+    http://<this-host>:8090
 
-Listens on localhost:8090 by default. Keep this on localhost - there is
-no authentication, and anyone who can reach this port can control the
-device.
+Listens on 0.0.0.0:8090 by default, i.e. on every interface, and serves the
+dashboard and the control API with **no authentication**: anyone who can reach
+the port can switch the device's AC/DC/master outputs. Bind it to a trusted
+interface (--bind or PS_BRIDGE_HOST) if that is not what you want, and do not
+port-forward it.
+
+The unit is talked to at 192.168.4.1:5000 by default, which is only valid
+while the phone/host is on the unit's own setup hotspot. Once the unit has
+joined your Wi-Fi, point the bridge at it with --device / PS_DEVICE_HOST.
 """
 
 import json
@@ -25,14 +31,38 @@ from socketserver import ThreadingMixIn
 
 from powerstation_control import PowerstationClient, PowerstationError
 
-HOST = "0.0.0.0"
-PORT = 8090
+HOST = os.environ.get("PS_BRIDGE_HOST", "0.0.0.0")
+PORT = int(os.environ.get("PS_BRIDGE_PORT", "8090"))
+# Device address. The default is only reachable on the unit's own setup
+# hotspot; set PS_DEVICE_HOST (or --device) to the unit's LAN IP to control it
+# after it has joined your Wi-Fi.
+DEVICE_HOST = os.environ.get("PS_DEVICE_HOST", "192.168.4.1")
+DEVICE_PORT = int(os.environ.get("PS_DEVICE_PORT", "5000"))
+# Largest JSON request body the bridge will read. Every legitimate body is a
+# handful of fields; without a cap one request can pin a thread indefinitely.
+MAX_BODY_BYTES = 64 * 1024
 DASHBOARD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "powerstation_dashboard.html")
 
 # Single shared client + lock, since the device only handles one TCP
 # connection's worth of conversation at a time.
 _client_lock = threading.Lock()
 _client: PowerstationClient = None
+
+
+def as_bool(value, default: bool = False) -> bool:
+    """Coerce a JSON value to a boolean.
+
+    bool("false") is True, so raw truthiness would switch a load ON when the
+    caller sent the string "false" or "off". Accept real booleans, numbers and
+    the usual on/off spellings, and fall back to `default` otherwise.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "on", "yes", "enable", "enabled")
+    return default
 
 
 def get_client(host: str = None, port: int = None) -> PowerstationClient:
@@ -49,9 +79,18 @@ def get_client(host: str = None, port: int = None) -> PowerstationClient:
                 _client.disconnect()
             except Exception:
                 pass
-        _client = PowerstationClient(host=host, port=port)
+        _client = PowerstationClient(host=host or DEVICE_HOST,
+                                    port=port or DEVICE_PORT)
         _client.connect(timeout=5.0)
     return _client
+
+
+class BadRequest(Exception):
+    """A request the bridge refuses to act on, with the status to answer."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -106,10 +145,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
             pass
 
     def read_json_body(self) -> dict:
-        length = int(self.headers.get("Content-Length", 0))
-        if length <= 0:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            raise BadRequest("invalid Content-Length")
+        if length < 0:
+            raise BadRequest("invalid Content-Length")
+        if length > MAX_BODY_BYTES:
+            raise BadRequest(f"request body exceeds {MAX_BODY_BYTES} bytes", status=413)
+        if length == 0:
             return {}
-        raw = self.rfile.read(length).decode("utf-8")
+        raw = self.rfile.read(length).decode("utf-8", errors="replace")
         if not raw:
             return {}
         try:
@@ -179,21 +225,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
-        body = self.read_json_body()
+        try:
+            body = self.read_json_body()
+        except BadRequest as e:
+            self.send_json({"ok": False, "error": str(e)}, status=e.status)
+            return
 
         if path == "/api/wifi/provision":
             self.handle_wifi_provision(body)
             return
 
         routes = {
-            "/api/master": lambda c: c.set_master_switch(bool(body.get("on"))),
-            "/api/ac": lambda c: c.set_ac_output(bool(body.get("on"))),
-            "/api/dc": lambda c: c.set_dc_output(bool(body.get("on"))),
-            "/api/beep": lambda c: c.set_buzzer(bool(body.get("on"))),
-            "/api/ambient-light": lambda c: c.set_ambient_light(bool(body.get("on"))),
-            "/api/sleep-mode": lambda c: c.set_sleep_mode(bool(body.get("on"))),
-            "/api/amp-up": lambda c: c.set_amp_up_mode(bool(body.get("on"))),
-            "/api/four-g": lambda c: c.set_four_g_switch(bool(body.get("on"))),
+            "/api/master": lambda c: c.set_master_switch(as_bool(body.get("on"))),
+            "/api/ac": lambda c: c.set_ac_output(as_bool(body.get("on"))),
+            "/api/dc": lambda c: c.set_dc_output(as_bool(body.get("on"))),
+            "/api/beep": lambda c: c.set_buzzer(as_bool(body.get("on"))),
+            "/api/ambient-light": lambda c: c.set_ambient_light(as_bool(body.get("on"))),
+            "/api/sleep-mode": lambda c: c.set_sleep_mode(as_bool(body.get("on"))),
+            "/api/amp-up": lambda c: c.set_amp_up_mode(as_bool(body.get("on"))),
+            "/api/four-g": lambda c: c.set_four_g_switch(as_bool(body.get("on"))),
             "/api/ac-hz": lambda c: c.set_ac_frequency(int(body.get("hz", 60))),
             "/api/led/brightness": lambda c: c.set_led_brightness(int(body.get("value", 50))),
             "/api/led/color": lambda c: c.set_led_color(int(body.get("id", 1))),
@@ -244,7 +294,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 # follows a disconnect with no gap.
                 time.sleep(1.0)
 
-            client = PowerstationClient(host="192.168.4.1", port=5000)
+            client = PowerstationClient(host=DEVICE_HOST, port=DEVICE_PORT)
             try:
                 client.connect(timeout=5.0)
                 result = client.provision_wifi(ssid, password, timeout=30.0)
@@ -273,8 +323,25 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    global HOST, PORT, DEVICE_HOST, DEVICE_PORT
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Powerstation HTTP bridge.")
+    ap.add_argument("--bind", default=HOST,
+                    help=f"address to listen on (default {HOST}, env PS_BRIDGE_HOST)")
+    ap.add_argument("--port", type=int, default=PORT,
+                    help=f"port to listen on (default {PORT}, env PS_BRIDGE_PORT)")
+    ap.add_argument("--device", default=DEVICE_HOST,
+                    help=f"power station IP (default {DEVICE_HOST}, env PS_DEVICE_HOST)")
+    ap.add_argument("--device-port", type=int, default=DEVICE_PORT,
+                    help=f"power station TCP port (default {DEVICE_PORT}, env PS_DEVICE_PORT)")
+    args = ap.parse_args()
+    HOST, PORT = args.bind, args.port
+    DEVICE_HOST, DEVICE_PORT = args.device, args.device_port
+
     server = ThreadingHTTPServer((HOST, PORT), BridgeHandler)
-    print(f"Powerstation bridge running at http://localhost:{PORT}")
+    print(f"Powerstation bridge running at http://{HOST}:{PORT} "
+          f"(device {DEVICE_HOST}:{DEVICE_PORT})")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
